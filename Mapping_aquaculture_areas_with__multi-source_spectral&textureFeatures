@@ -1,0 +1,235 @@
+var topo = ee.Image("NOAA/NGDC/ETOPO1"),
+    s2 = ee.ImageCollection("COPERNICUS/S2_SR"),
+    s1 = ee.ImageCollection("COPERNICUS/S1_GRD"),
+    geometry = ee.FeatureCollection("users/xy15045812917/1Aquaculture_buffer"),
+    pois = ee.FeatureCollection("users/xy15045812917/Aquaculture_allSamples_final2020");
+    
+    Map.centerObject(geometry,10); 
+var globalParam = {   
+    roi: geometry, 
+    //@@@@@时间修改 
+    start_date: '2020-1-1',//shaixuan筛选 影像shijian影像时间范围  起点时间 
+    end_date: '2020-12-31',//zhongzhishijian终止时间  
+    /////@@@@@时间修改
+      //因为landsat4-landsat7是7个光学波段，l8是8个波段多了一个海洋波段，这三行把波段重命名，这样就能l4-l7和l8的波段对应上
+    tree_nums:100,//决策树数目
+    tileScale: 16,
+    classProperty: 'landcover',
+    trained_data: false
+};
+
+function rmCloudByQA(image) {
+  var qa = image.select('QA60');
+  var cloudBitMask = 1 << 10;
+  var cirrusBitMask = 1 << 11;
+  var masks = qa.bitwiseAnd(cloudBitMask).eq(0)
+               .and(qa.bitwiseAnd(cirrusBitMask).eq(0));
+  return image.updateMask(masks);
+}
+
+function NDWI(image) {
+  var NDWIed = image.normalizedDifference(["B3",'B8']);
+  return image.addBands(NDWIed.rename("NDWI"));
+}
+
+var sentinel2 = s2.filterDate("2020-1-1","2020-12-31")
+                  .filterBounds(geometry)
+                  .filterMetadata("CLOUDY_PIXEL_PERCENTAGE", "less_than", 20)
+                  .map(rmCloudByQA)
+                  .map(NDWI)
+
+var ndwi_mean = sentinel2.select("NDWI").reduce(ee.Reducer.intervalMean(75, 100)).clip(geometry);
+//binary  !!!  To Connect
+var NDWI_threshold = ndwi_mean.gt(0.06).rename('threshold');
+//NDWI_threshold  = NDWI_threshold.updateMask(NDWI_threshold)
+var NDWI_means= ndwi_mean.updateMask(NDWI_threshold)//.multiply(100).int32();// 
+Map.addLayer(NDWI_means,{min:-1,max:1})
+// --------------------------- calculate NDVI_mean (gt 75%) ----------------------------------- 
+function NDVI(image) {
+  var NDVIed = image.normalizedDifference(["B8",'B4']);
+  return image.addBands(NDVIed.rename("NDVI"));
+}
+var sentinel22 = sentinel2.map(NDVI)
+var NDVI_means = sentinel22.select("NDVI").reduce(ee.Reducer.intervalMean(75, 100)).clip(geometry).updateMask(NDWI_threshold);
+
+// --------------------------- calculate NDBI_mean (gt 75%) -----------------------------------
+function NDBI(image) {
+  var swir = image.select('B11').resample().rename('swir')
+  var imag = image.addBands(swir)
+  var NDBIed = imag.normalizedDifference(["swir",'B8']);
+  return image.addBands(NDBIed.rename("NDBI"));
+}
+var sentinel222 = sentinel2.map(NDBI)
+var NDBI_means = sentinel222.select("NDBI").reduce(ee.Reducer.intervalMean(75, 100)).clip(geometry).updateMask(NDWI_threshold).focal_max(3).focal_min(3);
+print(NDBI_means,'NDBI_means')
+// ----------------------------------------- add sentinel1 -----------------------------------------------------
+var sentinel1 = s1.filterDate("2020-1-1","2020-12-31")
+                  .filterBounds(geometry)
+// --------------------------- calculate VV&VH (gt 75%) -----------------------------------
+var VHVV75 = sentinel1.select(["VV","VH"]).reduce(ee.Reducer.intervalMean(75, 100)).clip(geometry).updateMask(NDWI_threshold);;
+var VHVV_means = VHVV75.select(['VV_mean','VH_mean'],['VV','VH'])
+                 .updateMask(NDWI_threshold)//.multiply(10).int32();
+
+//---------------------------- calculate glcm ---------------------------------------------
+var bands1 =(NDWI_means.rename("NDWI")).addBands(NDBI_means.rename("NDBI"))
+var kernels = ee.Kernel.square(3)
+var glcmCorrelationAll =(NDVI_means.rename("NDVI")).addBands(bands1)
+                            .addBands(bands1.multiply(1000).int32().glcmTexture({size: 15, kernel: kernels,average:false}))
+//--------------------glcm select----------------------
+//print(glcmCorrelationAll)
+ //var bands = [ "blue_median","green_median","red_median","nir_median","swir1_median","NDVI","NDBI"] 
+ var bands = ["NDWI","NDVI","NDBI"]
+  var bands_NDBI_asm = ["NDBI_asm_-1_-1","NDBI_asm_0_-1","NDBI_asm_1_-1","NDBI_asm_-1_0"]
+  var bands_NDBI_contrast = ["NDBI_contrast_-1_-1","NDBI_contrast_0_-1","NDBI_contrast_1_-1","NDBI_contrast_-1_0"]
+  var bands_NDBI_corr = ["NDBI_corr_-1_-1","NDBI_corr_0_-1","NDBI_corr_1_-1","NDBI_corr_-1_0"]
+  var bands_NDBI_var = ["NDBI_var_-1_-1","NDBI_var_0_-1","NDBI_var_1_-1","NDBI_var_-1_0"]
+  var bands_NDBI_idm = ["NDBI_idm_-1_-1","NDBI_idm_0_-1","NDBI_idm_1_-1","NDBI_idm_-1_0"]
+  var bands_NDBI_ent = ["NDBI_ent_-1_-1","NDBI_ent_0_-1","NDBI_ent_1_-1","NDBI_ent_-1_0"]
+  var bands_NDBI_savg = ["NDBI_savg_-1_-1","NDBI_savg_0_-1","NDBI_savg_1_-1","NDBI_savg_-1_0"]
+  var bands_NDWI_asm = ["NDWI_asm_-1_-1","NDWI_asm_0_-1","NDWI_asm_1_-1","NDWI_asm_-1_0"]
+  var bands_NDWI_contrast = [ "NDWI_contrast_-1_-1","NDWI_contrast_0_-1","NDWI_contrast_1_-1","NDWI_contrast_-1_0"]
+  var bands_NDWI_corr = ["NDWI_corr_-1_-1","NDWI_corr_0_-1","NDWI_corr_1_-1","NDWI_corr_-1_0"]
+  var bands_NDWI_idm = ["NDWI_idm_-1_-1","NDWI_idm_0_-1","NDWI_idm_1_-1","NDWI_idm_-1_0"]
+  var bands_NDWI_ent = [ "NDWI_ent_-1_-1","NDWI_ent_0_-1","NDWI_ent_1_-1","NDWI_ent_-1_0"]
+  var bands_NDWI_var = ["NDWI_var_-1_-1","NDWI_var_0_-1","NDWI_var_1_-1","NDWI_var_-1_0"]
+  var bands_NDWI_savg = ["NDWI_savg_-1_-1","NDWI_savg_0_-1","NDWI_savg_1_-1","NDWI_savg_-1_0"]
+  var reducers = ee.Reducer.minMax()
+  var band_NDBI_asm = glcmCorrelationAll.select(bands_NDBI_asm).reduce(reducers)
+  var band_NDBI_contrast = glcmCorrelationAll.select(bands_NDBI_contrast).reduce(reducers)
+  var band_NDBI_corr = glcmCorrelationAll.select(bands_NDBI_corr).reduce(reducers) 
+  var band_NDBI_idm = glcmCorrelationAll.select(bands_NDBI_idm).reduce(reducers)
+  var band_NDBI_ent = glcmCorrelationAll.select(bands_NDBI_ent).reduce(reducers)
+  var band_NDBI_var = glcmCorrelationAll.select(bands_NDBI_var).reduce(reducers)
+  var band_NDBI_savg = glcmCorrelationAll.select(bands_NDBI_savg).reduce(reducers)
+  var band_NDWI_asm = glcmCorrelationAll.select(bands_NDWI_asm).reduce(reducers)
+  var band_NDWI_contrast = glcmCorrelationAll.select(bands_NDWI_contrast).reduce(reducers)
+  var band_NDWI_corr = glcmCorrelationAll.select(bands_NDWI_corr).reduce(reducers)
+  var band_NDWI_idm = glcmCorrelationAll.select(bands_NDWI_idm).reduce(reducers)
+  var band_NDWI_ent = glcmCorrelationAll.select(bands_NDWI_ent).reduce(reducers) 
+  var band_NDWI_var = glcmCorrelationAll.select(bands_NDWI_var).reduce(reducers)
+  var band_NDWI_savg = glcmCorrelationAll.select(bands_NDWI_savg).reduce(reducers)
+  var collection1 = glcmCorrelationAll.select(bands).addBands(band_NDBI_asm).addBands(band_NDBI_contrast).addBands(band_NDBI_corr).addBands(band_NDBI_idm)
+                   .addBands(band_NDBI_ent).addBands(band_NDWI_contrast).addBands(band_NDWI_corr).addBands(band_NDWI_idm).addBands(band_NDWI_ent)
+                   .addBands(band_NDWI_var).addBands(band_NDWI_savg)
+                   .addBands(band_NDBI_var).addBands(band_NDBI_savg).addBands(band_NDWI_asm)
+  var texture = VHVV_means.multiply(10).int32().glcmTexture(({size: 15, kernel: kernels,average:false}))  
+  print(texture)
+  var bands_VV_asm = ["VV_asm_-1_-1","VV_asm_0_-1","VV_asm_1_-1","VV_asm_-1_0"]
+  var bands_VV_var = ["VV_var_-1_-1","VV_var_0_-1","VV_var_1_-1","VV_var_-1_0"]
+  var bands_VV_ent = ["VV_ent_-1_-1","VV_ent_0_-1","VV_ent_1_-1","VV_ent_-1_0"]
+  var bands_VV_contrast = ["VV_contrast_-1_-1","VV_contrast_0_-1","VV_contrast_1_-1","VV_contrast_-1_0"]
+  var bands_VV_corr = ["VV_corr_-1_-1","VV_corr_0_-1","VV_corr_1_-1","VV_corr_-1_0"]
+  var bands_VV_idm = ["VV_idm_-1_-1","VV_idm_0_-1","VV_idm_1_-1","VV_idm_-1_0"]
+  var bands_VV_savg = ["VV_savg_-1_-1","VV_savg_0_-1","VV_savg_1_-1","VV_savg_-1_0"]
+
+  var bands_VH_asm = ["VH_asm_-1_-1","VH_asm_0_-1","VH_asm_1_-1","VH_asm_-1_0"]
+  var bands_VH_var = ["VH_var_-1_-1","VH_var_0_-1","VH_var_1_-1","VH_var_-1_0"]
+  var bands_VH_ent = ["VH_ent_-1_-1","VH_ent_0_-1","VH_ent_1_-1","VH_ent_-1_0"]
+  var bands_VH_contrast = ["VH_contrast_-1_-1","VH_contrast_0_-1","VH_contrast_1_-1","VH_contrast_-1_0"]
+  var bands_VH_corr = ["VH_corr_-1_-1","VH_corr_0_-1","VH_corr_1_-1","VH_corr_-1_0"]
+  var bands_VH_idm = ["VH_idm_-1_-1","VH_idm_0_-1","VH_idm_1_-1","VH_idm_-1_0"]
+  var bands_VH_savg = ["VH_savg_-1_-1","VH_savg_0_-1","VH_savg_1_-1","VH_savg_-1_0"]               
+                   
+  var band_VV_asm = texture.select(bands_VV_asm).reduce(reducers)
+  var band_VV_contrast = texture.select(bands_VV_contrast).reduce(reducers)
+  var band_VV_corr = texture.select(bands_VV_corr).reduce(reducers)
+  var band_VV_idm = texture.select(bands_VV_idm).reduce(reducers)
+  var band_VV_var = texture.select(bands_VV_var).reduce(reducers)
+  var band_VV_ent = texture.select(bands_VV_ent).reduce(reducers)
+  var band_VV_savg = texture.select(bands_VV_savg).reduce(reducers)
+  var band_VH_asm = texture.select(bands_VH_asm).reduce(reducers)
+  var band_VH_contrast = texture.select(bands_VH_contrast).reduce(reducers)
+  var band_VH_corr = texture.select(bands_VH_corr).reduce(reducers)
+  var band_VH_idm = texture.select(bands_VH_idm).reduce(reducers)
+  var band_VH_var = texture.select(bands_VH_var).reduce(reducers)
+  var band_VH_ent = texture.select(bands_VH_ent).reduce(reducers)
+  var band_VH_savg = texture.select(bands_VH_savg).reduce(reducers)             
+                   
+  var collection =  collection1.addBands(band_VV_asm).addBands(band_VV_contrast).addBands(band_VV_corr).addBands(band_VV_idm)
+                   .addBands(band_VV_var).addBands(band_VV_ent).addBands(band_VV_savg)
+                   .addBands(band_VH_asm).addBands(band_VH_contrast).addBands(band_VH_corr).addBands(band_VH_idm).addBands(band_VH_var)
+                   .addBands(band_VH_ent).addBands(band_VH_savg)        
+                   
+ var classProperty = 'landcover';
+ 
+ 
+//----------------------------- add etopo and composite all bands------------------------
+var raw_classify = collection.addBands((topo.select('bedrock').resample('bicubic').rename('ETOPO1')))
+
+print(raw_classify)
+//Map.addLayer(raw_classify1,{bands:['NDVI','NDBI','NDBI_idm']},'newImg',false)
+//   print("raw_classify1",raw_classify1)
+
+if (globalParam.trained_data !== true){
+// generate training data, and output as csv to fusion table later
+   var train_data = raw_classify.sampleRegions({
+     collection: pois,
+     properties:[globalParam.classProperty],
+     scale:10,
+     tileScale:globalParam.tileScale, 
+    // geometries:true 
+   });
+  
+}
+// Another way: Download the feature and upload to classify 
+//   Export.table.toDrive({
+//     collection:train_data,
+//     folder:'Aquaculture_2020final',
+//     description:'S12glcm_Featuress',
+//     fileFormat:'CSV'
+//   });  
+// }
+
+var classifier = ee.Classifier.smileRandomForest(globalParam.tree_nums)
+    .train({
+      features: train_data, 
+      classProperty: globalParam.classProperty,
+     
+    });
+//*************************
+
+
+            
+            
+// *****************
+// Print some info about the classifier (specific to CART).
+function export_classification_result(){
+  //@@@@@时间修改
+    var dateList = ee.List.sequence(2020,2020);
+    //@@@@@时间修改
+    dateList.evaluate(function(yrs){
+       for(var i=0; i<yrs.length; i++){
+           var start_time = ee.Date.fromYMD(yrs[i],1,1);
+           var end_time = ee.Date.fromYMD(yrs[i],12,31);
+           //var collectionFiltered = makeCollections(start_time,end_time);
+
+          // var image_reduced = collectionFiltered.reduce(reducer,globalParam.tileScale)
+          //                         //.addBands(topo.select('bedrock').resample('bicubic'))
+          //                         .clip(globalParam.roi);
+           var classified = raw_classify.classify(classifier).byte();
+           
+         var classified_only = classified.updateMask(classified);
+var n_length = geometry.size()//.aside(print);
+var n_list = geometry.toList(n_length);
+        for(var a=0; a<13; a++){
+            var f = ee.Feature(n_list.get(a));
+           Export.image.toDrive({
+               image:classified_only.clip(f),
+               //@@@@@时间修改
+               description:'classified_'+'S12glcm_'+ a,
+               //@@@@@时间修改
+               folder:'Aquaculture_2020final',
+               region:f,
+               scale:10,
+               maxPixels:1e13
+            });
+  }
+       }           
+})
+}
+export_classification_result();
+
+
+
+
+
